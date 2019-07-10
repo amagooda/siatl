@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from torch.autograd import Variable
-
+import torch.nn.functional as F
 from modules.helpers import sequence_mask, masked_normalization
 
 
@@ -127,8 +127,90 @@ class SelfAttention(nn.Module):
         energies = self.attention(sequence).squeeze()
 
         # construct a mask, based on sentence lengths
-        mask = sequence_mask(lengths, energies.size(1))
+        if len(energies.size()) < 2:
+            mask = sequence_mask(lengths, 1)
+        else:
+            mask = sequence_mask(lengths, energies.size(1))
         scores = masked_normalization(energies, mask)
         contexts = (sequence * scores.unsqueeze(-1)).sum(1)
 
         return contexts, scores
+
+
+class Linear(nn.Module):
+    def __init__(self, in_features, out_features, dropout=0.0):
+        super(Linear, self).__init__()
+
+        self.linear = nn.Linear(in_features=in_features, out_features=out_features)
+        if dropout > 0:
+            self.dropout = nn.Dropout(p=dropout)
+        self.reset_params()
+
+    def reset_params(self):
+        nn.init.kaiming_normal_(self.linear.weight)
+        nn.init.constant_(self.linear.bias, 0)
+
+    def forward(self, x):
+        if hasattr(self, 'dropout'):
+            x = self.dropout(x)
+        x = self.linear(x)
+        return x
+
+
+class CoAttention(nn.Module):
+    def __init__(self, input_size):
+        super(CoAttention, self).__init__()
+        self.att_weight_c = Linear(input_size, 1)
+        self.att_weight_q = Linear(input_size, 1)
+        self.att_weight_cq = Linear(input_size, 1)
+
+        # self.attention_and_query = nn.Linear(12 * hidden_size, hidden_size, bias=False)
+        # self.prob_attention = nn.Linear(hidden_size, 1, bias=False)
+
+    def forward(self, sentence, post):
+        """
+        :param sentence: (batch, c_len, hidden_size * 2)
+        :param post: (batch, q_len, hidden_size * 2)
+        :return: (batch, c_len, q_len)
+        """
+        c_len = sentence.size(1)
+        q_len = post.size(1)
+
+        # (batch, c_len, q_len, hidden_size * 2)
+        # c_tiled = c.unsqueeze(2).expand(-1, -1, q_len, -1)
+        # (batch, c_len, q_len, hidden_size * 2)
+        # q_tiled = q.unsqueeze(1).expand(-1, c_len, -1, -1)
+        # (batch, c_len, q_len, hidden_size * 2)
+        # cq_tiled = c_tiled * q_tiled
+        # cq_tiled = c.unsqueeze(2).expand(-1, -1, q_len, -1) * q.unsqueeze(1).expand(-1, c_len, -1, -1)
+
+        cq = []
+        for i in range(q_len):
+            # (batch, 1, hidden_size * 2)
+            qi = post.select(1, i).unsqueeze(1)
+            # (batch, c_len, 1)
+            ci = self.att_weight_cq(sentence * qi).squeeze()
+            cq.append(ci)
+        # (batch, c_len, q_len)
+        cq = torch.stack(cq, dim=-1)
+
+        # (batch, c_len, q_len)
+        s = self.att_weight_c(sentence).expand(-1, -1, q_len) + \
+            self.att_weight_q(post).permute(0, 2, 1).expand(-1, c_len, -1) + \
+            cq
+
+        # (batch, c_len, q_len)
+        a = F.softmax(s, dim=2)
+        # (batch, c_len, q_len) * (batch, q_len, hidden_size * 2) -> (batch, c_len, hidden_size * 2)
+        c2q_att = torch.bmm(a, post)
+        # (batch, 1, c_len)
+        b = F.softmax(torch.max(s, dim=2)[0], dim=1).unsqueeze(1)
+        # (batch, 1, c_len) * (batch, c_len, hidden_size * 2) -> (batch, hidden_size * 2)
+        q2c_att = torch.bmm(b, sentence).squeeze(1)
+        # (batch, c_len, hidden_size * 2) (tiled)
+        q2c_att = q2c_att.unsqueeze(1).expand(-1, c_len, -1)
+        # q2c_att = torch.stack([q2c_att] * c_len, dim=1)
+
+        # (batch, c_len, hidden_size * 8)
+        x = torch.cat([sentence, c2q_att, sentence * c2q_att, sentence * q2c_att], dim=-1)
+        return x

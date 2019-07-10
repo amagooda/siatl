@@ -63,6 +63,29 @@ def read_corpus(file, tokenize, vocab=None, vocab_size=None):
     return _vocab, _data
 
 
+def read_corpus_sum(sentences, posts, tokenize, vocab=None, vocab_size=None):
+    if vocab is not None:
+        _vocab = vocab
+    else:
+        _vocab = Vocab()
+
+    _data = []
+    _data_2 = []
+    for line1, line2 in zip(sentences, posts):
+        tokens = tokenize(line1)
+        tokens2 = tokenize(line2)
+        _vocab.read_tokens(tokens)
+        if len(tokens) <= 1 or len(tokens2) <= 1:
+            continue
+        else:
+            _data.append(tokens)
+            _data_2.append(tokens2)
+
+    if vocab is None:
+        _vocab.build(vocab_size)
+
+    return _vocab, _data, _data_2
+
 class LMCollate:
     """
     a variant of callate_fn that pads according to the longest sequence in
@@ -111,6 +134,32 @@ class ClfCollate:
         labels = torch.LongTensor([x[1] for x in batch])
         lengths = torch.LongTensor([x[2] for x in batch])
         return inputs, labels, lengths
+
+    def __call__(self, batch):
+        return self.pad_collate(batch)
+
+class SumCollate:
+    """
+    a variant of callate_fn that pads according to the longest sequence in
+    a batch of sequences
+    """
+
+    def __init__(self, sort=False, batch_first=True):
+        self.sort = sort
+        self.batch_first = batch_first
+
+    def pad_collate(self, batch):
+        # inputs = pad_sequence([torch.FloatTensor(x[0]) for x in batch],
+        #                       self.batch_first)
+        batch = sorted(batch, key=lambda x: x[3], reverse=True)
+        inputs = pad_sequence([torch.LongTensor(x[0]) for x in batch], self.batch_first)
+        posts = pad_sequence([torch.LongTensor(x[1]) for x in batch], self.batch_first)
+
+        labels = torch.LongTensor([x[2] for x in batch])
+        lengths = torch.LongTensor([x[3] for x in batch])
+        post_lengths = torch.LongTensor([x[4] for x in batch])
+
+        return inputs, posts, labels, lengths, post_lengths
 
     def __call__(self, batch):
         return self.pad_collate(batch)
@@ -198,6 +247,18 @@ class SortedSampler(Sampler):
         return len(self.lengths)
 
 
+class SequentialSampler(Sampler):
+
+    def __init__(self, lengths):
+        self.lengths = lengths
+        # self.desc = descending
+
+    def __iter__(self):
+        return iter(numpy.array(self.lengths))
+
+    def __len__(self):
+        return len(self.lengths)
+
 class BucketBatchSampler(Sampler):
     def __init__(self, lengths, batch_size, shuffle=False, drop_last=True):
         sorted_indices = numpy.array(lengths).argsort()
@@ -207,8 +268,7 @@ class BucketBatchSampler(Sampler):
 
     def __iter__(self):
         if self.shuffle:
-            return iter(self.batches[i]
-                        for i in torch.randperm(len(self.batches)))
+            return iter(self.batches[i] for i in torch.randperm(len(self.batches)))
         else:
             return iter(self.batches)
 
@@ -372,3 +432,83 @@ class ClfDataset(Dataset):
         inputs_vec = vectorize(input, self.vocab)
 
         return inputs_vec, label, length
+
+
+class SUMDataset(Dataset):
+    def __init__(self, input, posts,  labels=None, seq_len=0, preprocess=None,
+                 vocab=None, vocab_size=None,
+                 verbose=True, dataset=None, post_len=0):
+        """
+        Args:
+            preprocess (callable): preprocessing callable, which takes as input
+                a string and returns a list of tokens
+            input (str, list): the path to the data file, or a list of samples.
+            labels (numpy.ndarray): list of labels
+            seq_len (int): sequence length
+            vocab (Vocab): a vocab instance. If None, then build a new one
+                from the Datasets data.
+            vocab_size(int): if given, then trim the vocab to the given number.
+            verbose(bool): print useful statistics about the dataset.
+        """
+        self.input = input
+        self.posts = posts
+        self.labels = labels
+        self.dataset = dataset
+        self.vocab = vocab
+        if preprocess is not None:
+            self.preprocess = preprocess
+
+        self.vocab, self.data, self.data2 = read_corpus_sum(input, posts, self.preprocess, vocab, vocab_size)
+
+        if seq_len == 0:
+            self.seq_len = max([len(x) for x in self.data])
+        else:
+            self.seq_len = seq_len
+
+        if post_len == 0:
+            self.post_len = max([len(x) for x in self.data2])
+        else:
+            self.post_len = post_len
+
+        if verbose:
+            print(self)
+            print()
+
+        label_encoder = LabelEncoder()
+        self.labels = label_encoder.fit_transform(self.labels)
+
+    def __str__(self):
+        props = []
+        if isinstance(self.input, str):
+            props.append(("source", os.path.basename(self.input)))
+        props.append(("size", len(self)))
+        props.append(("vocab size", len(self.vocab)))
+        props.append(("unique tokens", len(self.vocab.vocab)))
+        props.append(("max seq length", self.seq_len))
+        props.append(("max post length", self.post_len))
+        return tabulate([[x[1] for x in props]], headers=[x[0] for x in props])
+
+    def truncate(self, n):
+        self.data = self.data[:n]
+        self.data2 = self.data2[:n]
+
+    @staticmethod
+    def preprocess(text, lower=True):
+        if lower:
+            text = text.lower()
+        return text.split()
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, index):
+
+        input = self.data[index][:self.seq_len]
+        post = self.data2[index][:self.post_len]
+        label = self.labels[index]
+        length = len(input)
+        length2 = len(post)
+        inputs_vec = vectorize(input, self.vocab)
+        posts_vec = vectorize(post, self.vocab)
+
+        return inputs_vec, posts_vec, label, length, length2

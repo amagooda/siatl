@@ -24,7 +24,7 @@ class Trainer:
                  valid_loader_train_set=None,
                  batch_end_callbacks=None,
                  unfreeze_embed=None,
-                 unfreeze_rnn=None):
+                 unfreeze_rnn=None, test_loader=None):
 
         self.model = model
         self.train_loader = train_loader
@@ -40,6 +40,7 @@ class Trainer:
         self.batch_size = self.config["batch_size"]
         self.checkpoint_interval = self.config["checkpoint_interval"]
         self.clip = self.config["model"]["clip"]
+        self.test_loader = test_loader
 
         if batch_end_callbacks is None:
             self.batch_end_callbacks = []
@@ -51,16 +52,31 @@ class Trainer:
         self.epoch = 0
         self.step = 0
         self.progress_log = None
-        if self.train_loader:
-            if isinstance(self.train_loader, (tuple, list)):
-                self.train_set_size = len(self.train_loader[0].dataset)
-            else:
-                self.train_set_size = len(self.train_loader.dataset)
 
-        if isinstance(self.valid_loader, (tuple, list)):
-            self.val_set_size = len(self.valid_loader[0].dataset)
+        if self.train_loader is None:
+            self.train_set_size = 0
         else:
-            self.val_set_size = len(self.valid_loader.dataset)
+            if self.train_loader:
+                if isinstance(self.train_loader, (tuple, list)):
+                    self.train_set_size = len(self.train_loader[0].dataset)
+                else:
+                    self.train_set_size = len(self.train_loader.dataset)
+
+        if self.valid_loader is None:
+            self.val_set_size = 0
+        else:
+            if isinstance(self.valid_loader, (tuple, list)):
+                self.val_set_size = len(self.valid_loader[0].dataset)
+            else:
+                self.val_set_size = len(self.valid_loader.dataset)
+
+        if self.test_loader is None:
+            self.test_set_size = 0
+        else:
+            if isinstance(self.test_loader, (tuple, list)):
+                self.test_set_size = len(self.test_loader[0].dataset)
+            else:
+                self.test_set_size = len(self.test_loader.dataset)
 
     def _roll_seq(self, x, dim=1, shift=1):
         length = x.size(dim) - shift
@@ -132,9 +148,7 @@ class Trainer:
                 optimizer.zero_grad()
 
             if isinstance(self.train_loader, (tuple, list)):
-                batch = list(map(lambda x:
-                                 list(map(lambda y: y.to(self.device), x)),
-                                 batch))
+                batch = list(map(lambda x: list(map(lambda y: y.to(self.device), x)), batch))
             else:
                 batch = list(map(lambda x: x.to(self.device), batch))
 
@@ -184,6 +198,41 @@ class Trainer:
             iterator = zip(*self.valid_loader)
         else:
             iterator = self.valid_loader
+
+        with torch.no_grad():
+            for i_batch, batch in enumerate(iterator, 1):
+
+                # move all tensors in batch to the selected device
+                if isinstance(self.valid_loader, (tuple, list)):
+                    batch = list(map(lambda x:
+                                     list(map(lambda y: y.to(self.device), x)),
+                                     batch))
+                else:
+                    batch = list(map(lambda x: x.to(self.device), batch))
+
+                batch_losses = self.process_batch(*batch)
+
+                # aggregate the losses into a single loss value
+                loss, _losses = self.aggregate_losses(batch_losses)
+                losses.append(_losses)
+
+        return np.array(losses).mean(axis=0)
+
+    def test_epoch(self):
+        """
+        Evaluate the network for one epoch and return the average loss.
+
+        Returns:
+            loss (float, list(float)): list of mean losses
+
+        """
+        self.model.eval()
+        losses = []
+
+        if isinstance(self.test_loader, (tuple, list)):
+            iterator = zip(*self.test_loader)
+        else:
+            iterator = self.test_loader
 
         with torch.no_grad():
             for i_batch, batch in enumerate(iterator, 1):

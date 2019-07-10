@@ -11,7 +11,7 @@ from utils.config import load_config
 signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
 
 
-def train_options(def_config, parser=None):
+def train_options(def_config, parser=None, device_to_use="auto"):
     if parser is None:
         parser = argparse.ArgumentParser()
 
@@ -26,10 +26,14 @@ def train_options(def_config, parser=None):
     args = parser.parse_args()
     config = load_config(os.path.join(MODEL_CNF_DIR, args.config))
 
-    if args.device == "auto":
+    print(device_to_use)
+    if device_to_use == "auto":
         args.device = torch.device("cuda" if torch.cuda.is_available()
                                    else "cpu")
+    else:
+        args.device = torch.device(device_to_use)
 
+    print(args.device)
     if args.source is None:
         args.source = []
 

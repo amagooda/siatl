@@ -6,7 +6,7 @@ from torch.nn.utils import clip_grad_norm_
 
 from modules.trainer import Trainer
 from utils.logging import epoch_progress
-from utils.training import save_checkpoint
+from utils.training import save_checkpoint, load_checkpoint
 
 
 class SentClfTrainer(Trainer):
@@ -165,10 +165,48 @@ class SentClfTrainer(Trainer):
                 # aggregate the losses into a single loss value
                 loss, _losses = self.aggregate_losses(batch_losses)
                 losses.append(_losses)
-        posteriors = torch.cat(posteriors, dim=0)
-        predicted = numpy.argmax(posteriors, 1)
-        labels_array = numpy.array(torch.cat(labels, dim=0))
+        posteriors = torch.cat(posteriors, dim=0).cpu()
+        predicted = numpy.argmax(posteriors, 1).cpu()
+        labels_array = numpy.array(torch.cat(labels, dim=0).cpu())
         return numpy.array(losses).mean(axis=0), labels_array, predicted
+
+
+    def test_epoch(self):
+        """
+        Evaluate the network for one epoch and return the average loss.
+
+        Returns:
+            loss (float, list(float)): list of mean losses
+
+        """
+        self.model.eval()
+        if isinstance(self.test_loader, (tuple, list)):
+            iterator = zip(*self.test_loader)
+        else:
+            iterator = self.test_loader
+
+        labels = []
+        posteriors = []
+
+        with torch.no_grad():
+            for i_batch, batch in enumerate(iterator, 1):
+
+                # move all tensors in batch to the selected device
+                if isinstance(self.test_loader, (tuple, list)):
+                    batch = list(map(lambda x:
+                                     list(map(lambda y: y.to(self.device), x)),
+                                     batch))
+                else:
+                    batch = list(map(lambda x: x.to(self.device), batch))
+
+                _, label, cls_logits = self.process_batch(*batch)
+                labels.append(label)
+                posteriors.append(cls_logits)
+        posteriors = torch.cat(posteriors, dim=0).cpu()
+        predicted = numpy.argmax(posteriors, 1).cpu()
+        labels_array = numpy.array(torch.cat(labels, dim=0).cpu())
+        return _, labels_array, predicted
+
 
     def get_state(self):
         _vocab = self.train_loader.dataset.vocab
@@ -186,6 +224,19 @@ class SentClfTrainer(Trainer):
         }
 
         return state
+
+    def load_checkpoint(self, name, path):
+        state = load_checkpoint(name, path=path)
+        self.config = state["config"]
+        self.epoch = state["epoch"]
+        self.step = state["step"]
+        self.model.load_state_dict(state["model"])
+        self.model.__class__.__name__ = state["model_class"]
+        # [x.state_dict() for x in self.optimizers] = state["optimizers"]: ,
+        _vocab = state["vocab"]
+        self.best_f1 = state["f1:"]
+        self.best_acc = state["acc"]
+        return _vocab
 
     def checkpoint(self, name=None, timestamp=False, tags=None, verbose=False):
 

@@ -3,7 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_packed_sequence, pack_padded_sequence
 
-from modules.layers import Embed, SelfAttention
+from modules.layers import Embed, SelfAttention, CoAttention
 from modules.embed_regularize import embedded_dropout
 from modules.locked_dropout import LockedDropout
 
@@ -451,3 +451,175 @@ class NaiveClassifier(nn.Module, RecurrentHelper):
 
         return cls_logits
 
+
+
+class SummarizationClassifier(nn.Module, RecurrentHelper):
+    def __init__(self, ntokens, nclasses, **kwargs):
+        super(SummarizationClassifier, self).__init__()
+
+        ############################################
+        # Params
+        ############################################
+        self.ntokens = ntokens
+        self.emb_size = kwargs.get("emb_size", 100)
+        self.embed_noise = kwargs.get("embed_noise", .0)
+        self.embed_dropout = kwargs.get("embed_dropout", .0)
+        self.bottom_rnn_size = kwargs.get("bottom_rnn_size", 100)
+        self.bottom_rnn_layers = kwargs.get("bottom_rnn_layers", 1)
+        self.bottom_rnn_dropout = kwargs.get("bottom_rnn_dropout", .0)
+        self.top_rnn_size = kwargs.get("top_rnn_size", 100)
+        self.top_rnn_layers = kwargs.get("top_rnn_layers", 1)
+        self.top_rnn_dropout = kwargs.get("top_rnn_dropout", .0)
+        self.tie_weights = kwargs.get("tie_weights", False)
+        self.pack = kwargs.get("pack", True)
+        self.attention_dropout = kwargs.get("attention_dropout", .0)
+        self.attention_layers = kwargs.get("attention_layers", 1)
+        self.dropout = kwargs.get("dropout", 0.1)
+        self.dropouti = kwargs.get("dropouti", 0.1)
+        self.dropouth = kwargs.get("dropouth", 0.1)
+        self.dropoute = kwargs.get("dropoute", 0.1)
+        self.wdrop = kwargs.get("wdrop", 0.0)
+        self.att = kwargs.get("has_att", False)
+        self.coatt = kwargs.get("has_coatt", False)
+        self.combine_att = kwargs.get("combine_att", False)
+        self.lockdrop = LockedDropout()
+        self.idrop = nn.Dropout(self.dropouti)
+        self.hdrop = nn.Dropout(self.dropouth)
+        self.drop = nn.Dropout(self.dropout)
+        self.top_bidir = kwargs.get("top_rnn_bidir", False)
+        self.new_lm = kwargs.get("new_lm", False)
+        ############################################
+        # Layers
+        ############################################
+        self.embed = Embed(ntokens, self.emb_size,
+               noise=self.embed_noise, dropout=self.embed_dropout)
+        if self.att or self.coatt:
+            last = False
+        else:
+            last = True
+
+        self.bottom_rnn = RNNModule(input_size=self.emb_size,
+                                    rnn_size=self.bottom_rnn_size,
+                                    num_layers=self.bottom_rnn_layers,
+                                    bidirectional=False,
+                                    dropout=self.bottom_rnn_dropout,
+                                    pack=self.pack)
+        if self.tie_weights:
+            input_top_size = self.emb_size
+        else:
+            input_top_size = self.bottom_rnn_size
+
+        self.top_rnn = RNNModule(input_size=input_top_size,
+                                 rnn_size=self.top_rnn_size,
+                                 num_layers=self.top_rnn_layers,
+                                 bidirectional=self.top_bidir,
+                                 dropout=self.top_rnn_dropout,
+                                 pack=self.pack,
+                                 last=last)
+        if self.att:
+            if self.combine_att and self.coatt:
+                self.attention = SelfAttention(attention_size=4 * self.top_rnn.feature_size, dropout=self.attention_dropout, layers=self.attention_layers)
+            else:
+                self.attention = SelfAttention(attention_size=self.top_rnn.feature_size, dropout=self.attention_dropout, layers=self.attention_layers)
+
+        if self.coatt:
+            self.coattention = CoAttention(input_size=self.top_rnn.feature_size)
+
+        self.vocab = nn.Linear(self.bottom_rnn_size, ntokens)
+
+        if self.coatt:
+            if self.combine_att and self.att:
+                self.classes = nn.Linear(4 * self.top_rnn.feature_size, nclasses)
+            elif self.att:
+                self.classes = nn.Linear(5 * self.top_rnn.feature_size, nclasses)
+            else:
+                self.classes = nn.Linear(4 * self.top_rnn.feature_size, nclasses)
+        else:
+            self.classes = nn.Linear(self.top_rnn.feature_size, nclasses)
+
+        if self.tie_weights:
+            self.vocab.weight = self.embed.embedding.weight
+            if self.bottom_rnn_size != self.emb_size:
+                self.down = nn.Linear(self.bottom_rnn_size,
+                                      self.emb_size)
+
+    def forward(self, src, lengths=None, posts=None, posts_lengths=None):
+
+        # step 1: embed the sentences
+        embeds = embedded_dropout(self.embed.embedding, src,
+                     dropout=self.dropoute if self.training else 0)
+
+        embeds = self.lockdrop(embeds, self.dropouti)
+
+        # step 2: encode the sentences
+        bottom_outs, _ = self.bottom_rnn(embeds, lengths=lengths)
+
+        if self.tie_weights and self.bottom_rnn_size != self.emb_size:
+            bottom_outs = self.down(bottom_outs)
+
+        bottom_outs = self.lockdrop(bottom_outs, self.dropout)
+
+        #######################################
+        if self.att and not self.coatt:
+            outputs, hidden = self.top_rnn(bottom_outs, lengths=lengths)
+            representations, attentions = self.attention(outputs, lengths)
+            cls_logits = self.classes(representations)
+
+        elif not self.att and self.coatt:
+            outputs, hidden = self.top_rnn(bottom_outs, lengths=lengths)
+            attentions = []
+            ################
+            embeds_posts = embedded_dropout(self.embed.embedding, posts, dropout=self.dropoute if self.training else 0)
+            embeds_posts = self.lockdrop(embeds_posts, self.dropouti)
+            posts_bottom_outs, _ = self.bottom_rnn(embeds_posts, lengths=posts_lengths)
+            if self.tie_weights and self.bottom_rnn_size != self.emb_size:
+                posts_bottom_outs = self.down(posts_bottom_outs)
+            posts_bottom_outs = self.lockdrop(posts_bottom_outs, self.dropout)
+            posts_outputs, posts_hidden = self.top_rnn(posts_bottom_outs, lengths=posts_lengths)
+            representations = self.coattention(outputs, posts_outputs).mean(1)
+            cls_logits = self.classes(representations)
+            ###################
+
+        elif self.att and self.coatt:
+            if self.combine_att:
+                outputs, hidden = self.top_rnn(bottom_outs, lengths=lengths)
+                ################
+                embeds_posts = embedded_dropout(self.embed.embedding, posts, dropout=self.dropoute if self.training else 0)
+                embeds_posts = self.lockdrop(embeds_posts, self.dropouti)
+                posts_bottom_outs, _ = self.bottom_rnn(embeds_posts, lengths=posts_lengths)
+                if self.tie_weights and self.bottom_rnn_size != self.emb_size:
+                    posts_bottom_outs = self.down(posts_bottom_outs)
+                posts_bottom_outs = self.lockdrop(posts_bottom_outs, self.dropout)
+                posts_outputs, posts_hidden = self.top_rnn(posts_bottom_outs, lengths=posts_lengths)
+                coatten_representations = self.coattention(outputs, posts_outputs)
+                ###################
+                representations, attentions = self.attention(coatten_representations, lengths)
+                # representations = torch.cat((representations, coatten_representations.mean(1)), 1)
+                cls_logits = self.classes(representations)
+            else:
+                outputs, hidden = self.top_rnn(bottom_outs, lengths=lengths)
+                representations, attentions = self.attention(outputs, lengths)
+                ################
+                embeds_posts = embedded_dropout(self.embed.embedding, posts, dropout=self.dropoute if self.training else 0)
+                embeds_posts = self.lockdrop(embeds_posts, self.dropouti)
+                posts_bottom_outs, _ = self.bottom_rnn(embeds_posts, lengths=posts_lengths)
+                if self.tie_weights and self.bottom_rnn_size != self.emb_size:
+                    posts_bottom_outs = self.down(posts_bottom_outs)
+                posts_bottom_outs = self.lockdrop(posts_bottom_outs, self.dropout)
+                posts_outputs, posts_hidden = self.top_rnn(posts_bottom_outs, lengths=posts_lengths)
+                coatten_representations = self.coattention(outputs, posts_outputs)
+                ###################
+                representations = torch.cat((representations, coatten_representations.mean(1)), 1)
+                cls_logits = self.classes(representations)
+
+
+        elif not self.att and not self.coatt:
+            outputs, hidden, last_hidden = self.top_rnn(bottom_outs, lengths=lengths)
+            cls_logits = self.classes(last_hidden)
+            attentions = []
+        #######################################
+
+        # step 3: output layers
+        lm_logits = self.hidden2vocab(bottom_outs, self.vocab)
+
+        return lm_logits, cls_logits, attentions

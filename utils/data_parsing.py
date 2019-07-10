@@ -65,15 +65,16 @@ def load_data_from_dir(path):
 
 
 def load_scv2_dataset(test=False):
-    path = os.path.join(DATA_DIR, 'SCv2-GEN', 'raw.pickle')
+    path = os.path.join(DATA_DIR, 'SCv2-GEN', 'raw_forum.pickle')
     if test:
         with open(path, 'rb') as f:
             data = pickle.load(f)
-        test = [(data['texts'][x], data['info'][x]["label"]) for x in
+        test = [(data['texts'][x], data['info'][x]["label"], data['post_ids'][x]) for x in
                  data['test_ind']]
         X_test = [x[0] for x in test]
         y_test = [x[1] for x in test]
-        dataset = [X_test, y_test]
+        pids_test = [x[2] for x in test]
+        dataset = [X_test, y_test, pids_test]
     else:
         with open(path, 'rb') as f:
             data = pickle.load(f)
@@ -91,6 +92,67 @@ def load_scv2_dataset(test=False):
     return dataset
 
 
+def load_forum_dataset(test=False):
+    path = os.path.join(DATA_DIR, 'Forum', 'raw_forum.pickle')
+    if test:
+        with open(path, 'rb') as f:
+            data = pickle.load(f)
+        test = [(data['texts'][x], data['info'][x]["label"], data['post_ids'][x], data['posts'][x]) for x in
+                 data['test_ind']]
+        X_test = [x[0] for x in test]
+        y_test = [x[1] for x in test]
+        pids_test = [x[2] for x in test]
+        posts = [x[3] for x in test]
+        dataset = [X_test, y_test, posts, pids_test, None]
+    else:
+        with open(path, 'rb') as f:
+            data = pickle.load(f)
+        train = [(data['texts'][x], data['info'][x]["label"], data['posts'][x]) for x in data['train_ind']]
+        val = [(data['texts'][x], data['info'][x]["label"], data['posts'][x]) for x in data['val_ind']]
+
+        X_train = [x[0] for x in train]
+        X_val = [x[0] for x in val]
+
+        y_train = [x[1] for x in train]
+        y_val = [x[1] for x in val]
+
+        post_train =[x[2] for x in train]
+        post_val = [x[2] for x in val]
+
+        dataset = [X_train, y_train, post_train, X_val, y_val, post_val]
+    return dataset
+
+
+def load_cnn_dataset(test=False):
+    path = os.path.join(DATA_DIR, 'CNN', 'raw_cnn.pickle')
+    if test:
+        with open(path, 'rb') as f:
+            data = pickle.load(f)
+        test = [(data['texts'][x], data['info'][x]["label"], data['post_ids'][x], data['human_summaries'][x], data['posts'][x]) for x in data['test_ind']]
+        X_test = [x[0] for x in test]
+        y_test = [x[1] for x in test]
+        pids_test = [x[2] for x in test]
+        human_summaries = [x[3] for x in test]
+        posts = [x[4] for x in test]
+        dataset = [X_test, y_test, posts, pids_test, human_summaries]
+    else:
+        with open(path, 'rb') as f:
+            data = pickle.load(f)
+        train = [(data['texts'][x], data['info'][x]["label"], data['posts'][x]) for x in data['train_ind']]
+        val = [(data['texts'][x], data['info'][x]["label"], data['posts'][x]) for x in data['val_ind']]
+
+        X_train = [x[0] for x in train]
+        X_val = [x[0] for x in val]
+
+        y_train = [x[1] for x in train]
+        y_val = [x[1] for x in val]
+
+        post_train =[x[2] for x in train]
+        post_val = [x[2] for x in val]
+
+        dataset = [X_train, y_train, post_train, X_val, y_val, post_val]
+    return dataset
+
 def load_sent17_dataset():
     train = load_data_from_dir(os.path.join(DATA_DIR,
                                             'sentiment2017/train'))
@@ -105,9 +167,17 @@ def load_sent17_dataset():
 
 def load_dataset(config, test=False):
     if config["data"]["dataset"] == "scv2":
+        print('Loading SCV2 dataset')
         dataset = load_scv2_dataset(test)
+    elif config["data"]["dataset"] == "cnn":
+        print('Loading cnn dataset')
+        dataset = load_cnn_dataset(test)
+    elif config["data"]["dataset"] == "forum":
+        print('Loading forum dataset')
+        dataset = load_forum_dataset(test)
     else:
-        dataset = load_sent17_dataset()
+        print('Data set not found')
+        # dataset = load_sent17_dataset()
     return dataset
 
 
