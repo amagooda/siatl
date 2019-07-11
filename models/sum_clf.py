@@ -292,7 +292,7 @@ def sum_clf_test(dataset, config, opts, transfer=False, output_dir=None, checkpo
                           seq_len=config['data']['seq_len'], post_len=config['data']['post_len'], preprocess=preprocessor,
                           vocab=_vocab)
     test_lengths = [len(x) for x in test_set.data]
-    test_sampler = SequentialSampler(test_lengths)
+    test_sampler = SortedSampler(test_lengths)
 
     # test_loader = DataLoader(test_set, sampler=test_sampler,
     #                          batch_size=config["batch_size"],
